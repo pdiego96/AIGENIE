@@ -207,13 +207,14 @@ generate_items_via_llm <- function(main.prompts, system.role, model, top.p, temp
 #' @param n.ctx Integer. Context window size
 #' @param n.gpu.layers Integer. GPU layers (-1 for all)
 #' @param max.tokens Integer. Max tokens per generation
+#' @param seed Integer. Seed passed to llama.cpp for reproducible sampling
 #'
-#' @return A list with 'items' data frame and 'successful' flag
+#' @return A list with 'items', 'successful', and local token 'usage'
 #' @keywords internal
 generate_items_via_local_llm <- function(main.prompts, system.role, model.path,
                                          temperature, top.p, adaptive, silently,
                                          target.N, n.ctx = 4096, n.gpu.layers = -1,
-                                         max.tokens = 1024) {
+                                         max.tokens = 1024, seed = 123L) {
 
   # Ensure llama-cpp is available
   ensure_llama_cpp_python(silently = silently)
@@ -225,6 +226,17 @@ generate_items_via_local_llm <- function(main.prompts, system.role, model.path,
     statement = character(),
     stringsAsFactors = FALSE
   )
+
+  usage_by_call <- data.frame(
+    item_type = character(),
+    call = integer(),
+    mode = character(),
+    prompt_tokens = integer(),
+    completion_tokens = integer(),
+    total_tokens = integer(),
+    stringsAsFactors = FALSE
+  )
+  call_number <- 0L
 
   # Load the model
   tryCatch({
@@ -238,7 +250,7 @@ generate_items_via_local_llm <- function(main.prompts, system.role, model.path,
       model_path = model.path,
       n_ctx = as.integer(n.ctx),
       n_gpu_layers = as.integer(n.gpu.layers),
-      seed = 123L,
+      seed = as.integer(seed),
       verbose = FALSE
     )
 
@@ -305,47 +317,78 @@ generate_items_via_local_llm <- function(main.prompts, system.role, model.path,
         next
       }
 
-      # Generate -- first attempt with 'max_tokens'; if the model requires
-      # 'max_completion_tokens' instead, catch that specific error and retry.
-      raw_text <- tryCatch({
-        response <- llm(
-          prompt = full_prompt,
+      # Prefer the chat template stored in the GGUF. Instruction-tuned models
+      # such as Gemma 4 may return no usable JSON when invoked as a plain text
+      # completion. Retain plain completion as a compatibility fallback for
+      # older GGUF files without a chat template.
+      generation <- tryCatch({
+        response <- llm$create_chat_completion(
+          messages = list(
+            list(role = "system", content = system.role),
+            list(role = "user", content = current_prompt)
+          ),
           max_tokens = as.integer(max.tokens),
           temperature = temperature,
-          top_p = top.p,
-          echo = FALSE,
-          stop = list("User:", "System:")
+          top_p = top.p
         )
-        response[["choices"]][[1]][["text"]]
-      }, error = function(e) {
-        # Some models require 'max_completion_tokens' instead of 'max_tokens'
-        if (grepl("max_tokens", conditionMessage(e), fixed = TRUE) &&
-            grepl("max_completion_tokens", conditionMessage(e), fixed = TRUE)) {
-          if (!silently) cat("Retrying with 'max_completion_tokens' parameter...\n")
-          tryCatch({
-            response <- llm(
-              prompt = full_prompt,
-              max_completion_tokens = as.integer(max.tokens),
-              temperature = temperature,
-              top_p = top.p,
-              echo = FALSE,
-              stop = list("User:", "System:")
-            )
-            response[["choices"]][[1]][["text"]]
-          }, error = function(e2) {
-            if (!silently) cat("Generation error:", conditionMessage(e2), "\n")
-            NULL
-          })
-        } else {
-          if (!silently) cat("Generation error:", conditionMessage(e), "\n")
-          NULL
+
+        list(
+          text = response[["choices"]][[1]][["message"]][["content"]],
+          response = response,
+          mode = "chat"
+        )
+      }, error = function(chat_error) {
+        if (!silently) {
+          cat("Chat template unavailable; retrying as plain completion.\n")
         }
+
+        tryCatch({
+          response <- llm(
+            prompt = full_prompt,
+            max_tokens = as.integer(max.tokens),
+            temperature = temperature,
+            top_p = top.p,
+            echo = FALSE,
+            stop = list("User:", "System:")
+          )
+
+          list(
+            text = response[["choices"]][[1]][["text"]],
+            response = response,
+            mode = "completion"
+          )
+        }, error = function(completion_error) {
+          if (!silently) {
+            cat("Generation error:", conditionMessage(completion_error), "\n")
+          }
+          NULL
+        })
       })
+
+      raw_text <- if (is.null(generation)) NULL else generation$text
 
       if (is.null(raw_text)) {
         iterations_without_new <- iterations_without_new + 1
         if (iterations_without_new >= 10) break
         next
+      }
+
+      call_number <- call_number + 1L
+      call_usage <- generation$response[["usage"]]
+
+      if (!is.null(call_usage)) {
+        usage_by_call <- rbind(
+          usage_by_call,
+          data.frame(
+            item_type = item_type,
+            call = call_number,
+            mode = generation$mode,
+            prompt_tokens = as.integer(call_usage[["prompt_tokens"]]),
+            completion_tokens = as.integer(call_usage[["completion_tokens"]]),
+            total_tokens = as.integer(call_usage[["total_tokens"]]),
+            stringsAsFactors = FALSE
+          )
+        )
       }
 
       # Parse
@@ -387,7 +430,36 @@ generate_items_via_local_llm <- function(main.prompts, system.role, model.path,
     cat("Total items generated:", nrow(all_items_df), "\n")
   }
 
-  return(list(items = all_items_df, successful = TRUE))
+  # Release the Metal context before loading the embedding model. Besides
+  # lowering peak memory, explicit closure avoids a llama.cpp shutdown assert
+  # observed when R exits with an open Gemma context on macOS.
+  try(llm$close(), silent = TRUE)
+  rm(llm)
+  gc(verbose = FALSE)
+
+  successful <- TRUE
+  for (item_type in names(target.N)) {
+    if (sum(all_items_df$type == item_type) < target.N[[item_type]]) {
+      successful <- FALSE
+    }
+  }
+
+  usage <- list(
+    calls = nrow(usage_by_call),
+    prompt_tokens = sum(usage_by_call$prompt_tokens),
+    completion_tokens = sum(usage_by_call$completion_tokens),
+    total_tokens = sum(usage_by_call$total_tokens),
+    by_call = usage_by_call
+  )
+
+  if (!silently && usage$calls > 0L) {
+    cat(
+      "Local token usage:", usage$prompt_tokens, "prompt +",
+      usage$completion_tokens, "completion =", usage$total_tokens, "total\n"
+    )
+  }
+
+  return(list(items = all_items_df, successful = successful, usage = usage))
 }
 
 #' Ensure llama-cpp-python is Installed

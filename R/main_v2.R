@@ -835,6 +835,7 @@ AIGENIE <- function(item.attributes, openai.API=NULL, hf.token=NULL, # required 
 #' @param n.ctx Context window size (default: 4096)
 #' @param n.gpu.layers GPU layers to use (-1 for all, default: -1)
 #' @param max.tokens Maximum tokens per generation (default: 1024)
+#' @param seed Integer seed passed to llama.cpp (default: 123)
 #' @param device Device for embeddings ("auto", "cpu", "cuda", "mps")
 #' @param batch.size Batch size for embeddings (default: 32)
 #' @param pooling.strategy Pooling for embeddings ("mean", "cls", "max")
@@ -1033,6 +1034,7 @@ local_AIGENIE <- function(
   n.ctx = 4096,
   n.gpu.layers = -1,
   max.tokens = 1024,
+  seed = 123L,
   device = "auto",
   batch.size = 32,
   pooling.strategy = "mean",
@@ -1074,6 +1076,17 @@ local_AIGENIE <- function(
     }
     ncores <- as.integer(ncores)
   }
+
+  if (length(seed) != 1L ||
+      !is.numeric(seed) ||
+      is.na(seed) ||
+      !is.finite(seed) ||
+      seed < 0 ||
+      seed > .Machine$integer.max ||
+      seed != as.integer(seed)) {
+    stop("`seed` must be a single non-negative integer.")
+  }
+  seed <- as.integer(seed)
 
 
   # Step 1: Validate all inputs
@@ -1140,14 +1153,15 @@ local_AIGENIE <- function(
   items_gen <- generate_items_via_local_llm(
     main.prompts, system.role, model.path,
     temperature, top.p, adaptive, silently,
-    target.N, n.ctx, n.gpu.layers, max.tokens
+    target.N, n.ctx, n.gpu.layers, max.tokens, seed
   )
 
   items <- items_gen$items
   success <- items_gen$successful
+  generation_usage <- items_gen$usage
 
-  if (is.data.frame(items)) {
-    items$ID <- 1:nrow(items)  # Add ID column
+  if (is.data.frame(items) && nrow(items) > 0L) {
+    items$ID <- seq_len(nrow(items))  # Add ID column
   }
 
   # Return if items only requested or generation failed
@@ -1155,6 +1169,7 @@ local_AIGENIE <- function(
     if (!success && !silently) {
       message("Item generation failed. Returning partial results.")
     }
+    attr(items, "local_llm_usage") <- generation_usage
     return(items)
   }
 
@@ -1179,7 +1194,11 @@ local_AIGENIE <- function(
       return(items)
     }
     if (embeddings.only) {
-      return(list(embeddings = embeddings, items = items))
+      return(list(
+        embeddings = embeddings,
+        items = items,
+        local_llm_usage = generation_usage
+      ))
     }
   }
 
@@ -1261,8 +1280,10 @@ local_AIGENIE <- function(
   }
 
   # Return results
-  return(build_return(item_level, overall_result,
-  run.overall, keep.org))
+  output <- build_return(item_level, overall_result,
+                         run.overall, keep.org)
+  output$local_llm_usage <- generation_usage
+  return(output)
 }
 
 
@@ -3258,6 +3279,4 @@ local_chat <- function(prompts, model.path,
 
   return(results_df)
 }
-
-
 

@@ -131,7 +131,7 @@ validate_user_input_AIGENIE <- function(item.attributes, openai.API, hf.token,
   EGA_params <- validate_ega_params(EGA.algorithm, EGA.uni.method, EGA.model)
   EGA.algorithm <- EGA_params$EGA.algorithm
   EGA.uni.method <- EGA_params$EGA.uni.method
-  EGA.model <- EGA_params$EGA.model
+  EGA.model <- EGA_params$EGA_model
 
 
   # Validate target N
@@ -263,7 +263,7 @@ validate_user_input_local_AIGENIE <- function(
   EGA_params <- validate_ega_params(EGA.algorithm, EGA.uni.method, EGA.model)
   EGA.algorithm <- EGA_params$EGA.algorithm
   EGA.uni.method <- EGA_params$EGA.uni.method
-  EGA.model <- EGA_params$EGA.model
+  EGA.model <- EGA_params$EGA_model
 
   # 7. Validate target.N
   target.N <- target.N_validate(target.N, item.attributes, items.only, embeddings.only, silently)

@@ -104,3 +104,81 @@ test_that("create_main.prompts returns a named list matching item.attributes", {
 
 })
 
+test_that("EGA model validation preserves an explicitly requested model", {
+
+  result <- AIGENIE:::validate_ega_params(
+    EGA.algorithm = "walktrap",
+    EGA.uni.method = "louvain",
+    EGA_model = "TMFG"
+  )
+
+  expect_equal(result$EGA_model$type, "TMFG")
+  expect_equal(result$EGA_model$overall, "TMFG")
+
+  model_path <- tempfile(fileext = ".gguf")
+  writeBin(as.raw(1), model_path)
+  on.exit(unlink(model_path), add = TRUE)
+
+  local_result <- suppressWarnings(
+    AIGENIE:::validate_user_input_local_AIGENIE(
+      item.attributes = list(
+        conscientiousness = c(
+          "organized", "responsible", "disciplined", "prudent"
+        )
+      ),
+      model.path = model_path,
+      embedding.model = "bert-base-uncased",
+      main.prompts = NULL,
+      temperature = 1,
+      top.p = 1,
+      target.N = 60,
+      domain = "test",
+      scale.title = "test",
+      item.examples = NULL,
+      audience = NULL,
+      item.type.definitions = NULL,
+      response.options = NULL,
+      prompt.notes = NULL,
+      system.role = NULL,
+      EGA.model = "TMFG",
+      EGA.algorithm = "walktrap",
+      EGA.uni.method = "louvain",
+      n.ctx = 2048,
+      n.gpu.layers = -1,
+      max.tokens = 384,
+      device = "auto",
+      batch.size = 32,
+      pooling.strategy = "mean",
+      max.length = 512L,
+      keep.org = TRUE,
+      items.only = FALSE,
+      embeddings.only = FALSE,
+      adaptive = TRUE,
+      run.overall = FALSE,
+      all.together = FALSE,
+      plot = FALSE,
+      silently = TRUE
+    )
+  )
+
+  expect_equal(local_result$EGA.model$type, "TMFG")
+  expect_equal(local_result$EGA.model$overall, "TMFG")
+
+})
+
+test_that("local generation exposes a reproducible llama.cpp seed", {
+
+  expect_identical(formals(local_AIGENIE)$seed, 123L)
+  expect_identical(
+    formals(AIGENIE:::generate_items_via_local_llm)$seed,
+    123L
+  )
+  expect_match(
+    paste(
+      deparse(body(AIGENIE:::generate_items_via_local_llm)),
+      collapse = "\n"
+    ),
+    "seed = as.integer\\(seed\\)"
+  )
+
+})
